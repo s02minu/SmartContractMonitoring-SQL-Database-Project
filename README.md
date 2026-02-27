@@ -222,6 +222,121 @@ If a valid insertion passes all checks, it is committed and `TotalParticipants`
 in `UserInteractions` is automatically updated using a CTE aggregation.  
 Descriptive error messages are raised for each specific failure case.
 
+Walkthrough on testing the triggers functionality. Other tests can be found in the `SmartContractMonitoring_Trigger.sql` file.
+
+
+**STEP 0 — Clean controlled environment** 
+```sql
+	delete from WalletInteractions where WalletAddress like '0xTestWallet%';
+	delete from Wallets where WalletAddress like '0xTestWallet%';
+	delete from UserInteractions where ContractAddress = '0xTESTCONTRACT';
+	delete from SmartContracts where ContractAddress = '0xTESTCONTRACT';
+```
+
+**STEP 1 — Create test wallets** 
+```sql
+	insert into Wallets (WalletAddress, FirstSeen)
+	values  ('0xTestWalletA','2025-01-01 00:00:00'),
+		    ('0xTestWalletB','2025-01-01 00:00:00'),
+		    ('0xTestWalletC','2025-01-01 00:00:00');
+
+	-- verify it was created
+	select * 
+	from Wallets 
+	where WalletAddress like '0xTestWallet%';
+
+```
+
+**STEP 2 — Create a test Smart Contract** 
+```sql
+	insert into SmartContracts (ContractAddress, ContractName, Symbol, DeployedAt, TotalInteractions, RiskLevelCode) 
+	values	('0xTESTCONTRACT','Teste','TST','2025-12-01 10:00:00',5,2);
+
+	-- verify it was created
+	select * 
+	from SmartContracts 
+	where ContractAddress = '0xTESTCONTRACT';
+
+```
+
+
+**STEP 3 — Create interaction with LIMITED capacity (2 slots)** 
+```sql
+	insert into UserInteractions 
+			(ContractAddress, InteractionTypeCode, ScheduledAt, DurationMinutes, 
+			TotalParticipants, MaxParticipants, MinWalletAgeDays, InteractionState)
+	values	('0xTESTCONTRACT', 1, '2025-02-01 10:00:00', 60, 0, 2 /* Apenas 2 vagas */, 0, 1);
+
+	-- verify it was created
+	select * 
+	from UserInteractions 
+	where ContractAddress = '0xTESTCONTRACT'
+
+```
+
+**TEST 1 — valid Interaction (first slot filled)** 
+```sql
+	-- declaring the variable to store the interactionID
+	declare @TestInteractionId int;
+	set @TestInteractionId = (select InteractionId from UserInteractions where ContractAddress = '0xTESTCONTRACT')
+	
+	insert into WalletInteractions (WalletAddress, InteractionId)
+	values ('0xTestWalletA', @TestInteractionId);
+	
+	select * 
+	from WalletInteractions 
+	where InteractionId = @TestInteractionId;
+
+	-- verifying it was created
+	select InteractionId, TotalParticipants
+	from UserInteractions 
+	where InteractionId = @TestInteractionId;
+
+```
+<img width="374" height="116" alt="image" src="https://github.com/user-attachments/assets/2918fbab-f588-47b0-871d-a90d662c72f0" />
+
+
+**TEST 2 — valid Interaction (second slot filled)** 
+```sql
+	-- declaring the variable to store the interactionID
+	declare @Test2InteractionId int;
+	set @Test2InteractionId = (select InteractionId from UserInteractions where ContractAddress = '0xTESTCONTRACT')
+	
+	insert into WalletInteractions (WalletAddress, InteractionId)
+	values ('0xTestWalletB', @Test2InteractionId);
+	
+	select * 
+	from WalletInteractions 
+	where InteractionId = @Test2InteractionId;
+	
+	select InteractionId, TotalParticipants
+	from UserInteractions 
+	where InteractionId = @Test2InteractionId;
+
+```
+<img width="367" height="84" alt="image" src="https://github.com/user-attachments/assets/1c3bc9c1-d5ed-48d5-8ea3-a47c7c9fb5c8" />
+
+**TEST 3 — Capacity exceeded ( must FAIL)** 
+```sql
+	-- declaring the variable to store the interactionID
+	declare @Test3InteractionId int;
+	set @Test3InteractionId = (select InteractionId from UserInteractions where ContractAddress = '0xTESTCONTRACT')
+
+	insert into WalletInteractions (WalletAddress, InteractionId)
+	values ('0xTestWalletC', @Test3InteractionId);
+
+	select * 
+	from WalletInteractions 
+	where InteractionId = @Test3InteractionId;
+
+	select InteractionId, TotalParticipants
+	from UserInteractions 
+	where InteractionId = @Test3InteractionId;
+
+```
+<img width="782" height="184" alt="image" src="https://github.com/user-attachments/assets/8e330aa7-d892-444f-be52-ba5f39787547" />
+
+
 ---
 
 ## Key SQL Features Used
