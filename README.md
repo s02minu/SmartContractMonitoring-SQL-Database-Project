@@ -1,4 +1,4 @@
-# Smart ContractM onitoring — SQL Database Project
+# Smart Contract Monitoring — SQL Database Project
 
 > Academic project developed for UFCD 10797 – Gestão e Armazenamento de Dados  
 > IEFP – Instituto de Emprego e Formação Profissional, Viseu | Aprend+ 02/2025
