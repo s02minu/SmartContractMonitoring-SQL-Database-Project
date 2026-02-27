@@ -16,7 +16,7 @@ wallets, smart contracts, transactions, and auditors — simulating what a real 
 
 ---
 
-## Why Blockchain?
+## Objective
 
 The original task asked for a database to manage hiking routes and participants.  
 I chose to map those concepts to the Ethereum ecosystem:
