@@ -1,158 +1,274 @@
-		-------------------------------------------------------------------------------------------------------------------
-		-------------------------------------------------------------------------------------------------------------------
-		/*							 Triggers Adaptadas ao SmartContractMonotoring										 */
-		-------------------------------------------------------------------------------------------------------------------
-		-------------------------------------------------------------------------------------------------------------------
-		use SmartContractMonitoring
+	-------------------------------------------------------------------------------------------------------------------
+	-------------------------------------------------------------------------------------------------------------------
+	/*							 Triggers Adaptadas ao SmartContractMonotoring										 */
+	-------------------------------------------------------------------------------------------------------------------
+	-------------------------------------------------------------------------------------------------------------------
+	use SmartContractMonitoring
+	go
+	
+	/*
+		Este Trigger previne que sejam feitas inserts no WalletInteraction se a Wallet nao existir.
+		Tambem evita interacoescom a SmartContract caso nao hajma mais vagas de participacao
+	
+	*/
+	--drop trigger trg_InsertWalletInteraction
+	
+	create trigger trg_InsertWalletInteraction
+	on WalletInteractions
+	instead of insert
+	as
+	begin
+		set nocount on;
+	
+		-- Declara√ß√£o de uma tabela tempor√°ria para armazenar as inser√ß√µes v√°lidas
+		declare @ValidInsertions table(
+				WalletAddress varchar(200),
+				InteractionId int
+		)
+	
+		----------------------------------------------------------------------------------
+		-- 1. Identificar e inserir linhas validas na tabela temporaria
+		-- Uma linha √© considerada v√°lida se:
+		-- A) A Wallet e a Interaction existem (Integridade Referencial)
+		-- B) O registo n√£o existe em WalletInteractions (Evitar Duplica√ß√£o)
+		-- C) A Interaction ainda tem vagas dispon√≠veis (Regra de Neg√≥cio)
+		----------------------------------------------------------------------------------
+		insert into @ValidInsertions (WalletAddress, InteractionId)
+		select i.WalletAddress, i.InteractionId
+		from inserted i
+		inner join Wallets w on i.WalletAddress = w.WalletAddress
+		inner join UserInteractions ui on  i.InteractionId = ui.InteractionId
+		where not exists ( -- apenas serao inseridas dentro do @ValidInsertions as carteiras que nao existem na base de dados
+							select 1 
+							from WalletInteractions wi
+							where wi.WalletAddress = i.WalletAddress
+							and wi.InteractionId = i.InteractionId
+				)
+		and ui.MaxParticipants > ui.TotalParticipants -- garante que o nr de participantes nao ultrapasse a lotacao de interacoes possiveis com o SmartContract
+	
+		---------------------------------------------------------------------------------------
+		-- 2. Tratamento de erros
+		-- Este bloco identifica as linhas que falharam nas regras espec√≠ficas e levanta erros.
+		----------------------------------------------------------------------------------------
+		-- Erro de Wallet inexistente
+		if exists ( 
+					select 1 
+					from inserted i left join Wallets w 
+					on i.WalletAddress = w.WalletAddress 
+					where w.WalletAddress is null
+				)
+				begin
+					raiserror('Uma ou mais wallet n√£o existe na table Wallet', 16, 1)
+				end
+		
+		-- Erro de Intera√ß√£o inexistente
+		else if exists ( 
+					select 1 
+					from inserted i left join UserInteractions ui 
+					on i.InteractionId = ui.InteractionId 
+					where ui.InteractionId is null
+				)
+				begin
+					raiserror('Uma ou mais interaction n√£o existe na table UserInteractions', 16, 1)
+				end
+	
+		-- Erro de Duplica√ßao
+		else if exists ( 
+					select 1 
+					from inserted i,  WalletInteractions wi 
+					where wi.WalletAddress = i.WalletAddress 
+					and wi.InteractionId = i.InteractionId
+				)
+				begin
+					raiserror('Uma wallet com este registo ja existe no sistema', 16, 1)
+				end
+	
+		-- Erro de Vagas Esgotadas
+		else if exists ( 
+					select 1 
+					from inserted i,  UserInteractions ui 
+					where ui.InteractionId = i.InteractionId
+					and ui.MaxParticipants <= ui.TotalParticipants
+					and not exists ( -- Exclui as que j√° falharam por outros motivos (e.g., wallet/interaction inexistente)
+									select 1 
+									from  @ValidInsertions vi, inserted i
+									where vi.WalletAddress = i.WalletAddress 
+									and vi.InteractionId = i.InteractionId
+									)
+				)
+				begin
+					raiserror('J√° n√£o h√° intera√ß√µes possiveis', 16, 1)
+				end
+	
+		----------------------------------------------------------------------------------
+		-- 3. Inserir os registos na tabela WalletInteractions e atualizar o numero 
+		--    de participantes na UserInteractions
+		-- 
+		----------------------------------------------------------------------------------
+	
+		-- Inserir as linhas v√°lidas da tabela tempor√°ria para a tabela final
+		insert into WalletInteractions (WalletAddress, InteractionId, JoinedAt)
+	¬† ¬†			select WalletAddress, InteractionId, getdate()
+		from @ValidInsertions;
+	
+		-- Atualizar o TotalParticipants para todas as Interactions que receberam novos registos
+		with CountedValid as ( 
+								select InteractionId, count(*) NewRegistrations
+	¬† ¬† ¬† ¬†								from @ValidInsertions
+	¬† ¬† ¬† ¬†								group by InteractionId
+							)
+	
+	¬† ¬†			update ui
+	¬† ¬†			set ui.TotalParticipants = ui.TotalParticipants + cv.NewRegistrations
+	¬† ¬†			from UserInteractions ui, CountedValid cv
+		where ui.InteractionId = cv.InteractionId
+	end
+	
+	
+	
+		----------------------------------------------------------------------------------
+		--								Testes do Trigger					     		--
+		----------------------------------------------------------------------------------	
+	
+		-- *** Preparar o terreno para novo teste  ***
+	
+		delete from WalletInteractions where WalletAddress like '0xTestWallet%';
+		delete from Wallets where WalletAddress like '0xTestWallet%';
+		delete from UserInteractions where ContractAddress = '0xTESTCONTRACT';
+		delete from SmartContracts where ContractAddress = '0xTESTCONTRACT';
+	
+		
+		-- *** Criar Carteiras de Teste ***
+		insert into Wallets (WalletAddress, FirstSeen)
+			values  ('0xTestWalletA','2025-01-01 00:00:00'),
+				   ('0xTestWalletB','2025-01-01 00:00:00'),
+				   ('0xTestWalletC','2025-01-01 00:00:00');
+	
+		select * 
+		from Wallets 
+		where WalletAddress like '0xTestWallet%'; -- Verificar se for criado
+	
+	
+		-- *** Criar ContractoInteligente Teste ***
+		insert into SmartContracts (ContractAddress, ContractName, Symbol, DeployedAt, TotalInteractions, RiskLevelCode) 
+		values	('0xTESTCONTRACT','Teste','TST','2025-12-01 10:00:00',5,2)
+	
+		select * 
+		from SmartContracts 
+		where ContractAddress = '0xTESTCONTRACT'; -- Verificar se for criado
+	
+	
+		-- *** Criar Intera√ß√£o dos Utilizadores (2 vagas) ***
+		insert into UserInteractions 
+					(ContractAddress, InteractionTypeCode, ScheduledAt, DurationMinutes, TotalParticipants, MaxParticipants, MinWalletAgeDays, InteractionState)
+			values	('0xTESTCONTRACT', 1, '2025-02-01 10:00:00', 60, 0, 2 /* Apenas 2 vagas */, 0, 1);
+	
+	
+		select * 
+		from UserInteractions 
+		where ContractAddress = '0xTESTCONTRACT' -- Verificar se for criado 
+	
+	
+		
+	
+		-- *** Teste 1 - inser√ß√£o v√°lida ***
+		declare @TestInteractionId int;
+		set @TestInteractionId = (select InteractionId from UserInteractions where ContractAddress = '0xTESTCONTRACT')
+	
+		insert into WalletInteractions (WalletAddress, InteractionId)
+		values ('0xTestWalletA', @TestInteractionId);
+	
+		select * 
+		from WalletInteractions 
+		where InteractionId = @TestInteractionId;
+	
+		select InteractionId, TotalParticipants
+		from UserInteractions 
+		where InteractionId = @TestInteractionId;
+		go
+	
+	
+		-- *** Teste 2 - inser√ß√£o v√°lida (Prencher todas as vagas) ***
+		declare @Test2InteractionId int;
+		set @Test2InteractionId = (select InteractionId from UserInteractions where ContractAddress = '0xTESTCONTRACT')
+	
+		insert into WalletInteractions (WalletAddress, InteractionId)
+		values ('0xTestWalletB', @Test2InteractionId);
+	
+		select * 
+		from WalletInteractions 
+		where InteractionId = @Test2InteractionId;
+	
+		select InteractionId, TotalParticipants
+		from UserInteractions 
+		where InteractionId = @Test2InteractionId;
+		go
+	
+	
+		-- *** Teste 3 - inser√ß√£o inv√°lida (vagas j√° todas ja preenchidas) ***
+		declare @Test3InteractionId int;
+		set @Test3InteractionId = (select InteractionId from UserInteractions where ContractAddress = '0xTESTCONTRACT')
+	
+		insert into WalletInteractions (WalletAddress, InteractionId)
+		values ('0xTestWalletC', @Test3InteractionId);
+	
+		select * 
+		from WalletInteractions 
+		where InteractionId = @Test3InteractionId;
+	
+		select InteractionId, TotalParticipants
+		from UserInteractions 
+		where InteractionId = @Test3InteractionId;
+		go
+	
+		-- *** Teste 4 - inser√ß√£o duplicda (deve falhar) ***
+		declare @Test4InteractionId int;
+		set @Test4InteractionId = (select InteractionId from UserInteractions where ContractAddress = '0xTESTCONTRACT')
+	
+		insert into WalletInteractions (WalletAddress, InteractionId)
+		values ('0xTestWalletA', @Test4InteractionId);
+	
+		select * 
+		from WalletInteractions 
+		where InteractionId = @Test4InteractionId;
+	
+		select InteractionId, TotalParticipants
+		from UserInteractions 
+		where InteractionId = @Test4InteractionId;
+		go
+	
+		-- *** Teste 5 - inser√ß√£o invalida, carteira inexistente (deve falhar) ***
+		declare @Test5InteractionId int;
+		set @Test5InteractionId = (select InteractionId from UserInteractions where ContractAddress = '0xTESTCONTRACT')
+	
+		insert into WalletInteractions (WalletAddress, InteractionId)
+		values ('0xFakeWalletZZZ', @Test5InteractionId);
+	
+		select * 
+		from WalletInteractions 
+		where InteractionId = @Test5InteractionId;
+	
+		select InteractionId, TotalParticipants
+		from UserInteractions 
+		where InteractionId = @Test5InteractionId;
+		go
+	
+		-- *** Teste 6 - inser√ß√£o de id inexistente (deve falhar) ***
+		declare @Test6InteractionId int;
+		set @Test6InteractionId = 999
+	
+		insert into WalletInteractions (WalletAddress, InteractionId)
+		values ('0xTestWalletA', @Test6InteractionId);
+	
+		select * 
+		from WalletInteractions 
+		where InteractionId = @Test6InteractionId;
+	
+		select InteractionId, TotalParticipants
+		from UserInteractions 
+		where InteractionId = @Test6InteractionId;
 		go
 
-		/*
-			Este Trigger previne que sejam feitas inserts no WalletInteraction se a Wallet nao existir.
-			Tambem evita interacoescom a SmartContract caso nao hajma mais vagas de participacao
-
-		*/
-		drop trigger trg_InsertWalletInteraction
-
-		create trigger trg_InsertWalletInteraction
-		on WalletInteractions
-		instead of insert
-		as
-		begin
-			set nocount on;
-
-			-- DeclaraÁ„o de uma tabela tempor·ria para armazenar as inserÁıes v·lidas
-			declare @ValidInsertions table(
-					WalletAddress varchar(200),
-					InteractionId int
-			)
-
-			----------------------------------------------------------------------------------
-			-- 1. Identificar e inserir linhas validas na tabela temporaria
-			-- Uma linha È considerada v·lida se:
-			-- A) A Wallet e a Interaction existem (Integridade Referencial)
-			-- B) O registo n„o existe em WalletInteractions (Evitar DuplicaÁ„o)
-			-- C) A Interaction ainda tem vagas disponÌveis (Regra de NegÛcio)
-			----------------------------------------------------------------------------------
-			insert into @ValidInsertions (WalletAddress, InteractionId)
-			select i.WalletAddress, i.InteractionId
-			from inserted i
-			inner join Wallets w on i.WalletAddress = w.WalletAddress
-			inner join UserInteractions ui on  i.InteractionId = ui.InteractionId
-			where not exists ( -- apenas serao inseridas dentro do @ValidInsertions as carteiras que nao existem na base de dados
-								select 1 
-								from WalletInteractions wi
-								where wi.WalletAddress = i.WalletAddress
-								and wi.InteractionId = i.InteractionId
-					)
-			and ui.MaxParticipants > ui.TotalParticipants -- garante que o nr de participantes nao ultrapasse a lotacao de interacoes possiveis com o SmartContract
-
-			---------------------------------------------------------------------------------------
-			-- 2. Tratamento de erros
-			-- Este bloco identifica as linhas que falharam nas regras especÌficas e levanta erros.
-			----------------------------------------------------------------------------------------
-			-- Erro de Wallet inexistente
-			if exists ( 
-						select 1 
-						from inserted i left join Wallets w 
-						on i.WalletAddress = w.WalletAddress 
-						where w.WalletAddress is null
-					)
-					begin
-						raiserror('Uma ou mais wallet n„o existe na table Wallet', 16, 1)
-					end
-			
-			-- Erro de InteraÁ„o inexistente
-			else if exists ( 
-						select 1 
-						from inserted i left join UserInteractions ui 
-						on i.InteractionId = ui.InteractionId 
-						where ui.InteractionId is null
-					)
-					begin
-						raiserror('Uma ou mais interaction n„o existe na table UserInteractions', 16, 1)
-					end
-
-			-- Erro de DuplicaÁao
-			else if exists ( 
-						select 1 
-						from inserted i,  WalletInteractions wi 
-						where wi.WalletAddress = i.WalletAddress 
-						and wi.InteractionId = i.InteractionId
-					)
-					begin
-						raiserror('Uma wallet com este registo ja existe no sistema', 16, 1)
-					end
-
-			-- Erro de Vagas Esgotadas
-			else if exists ( 
-						select 1 
-						from inserted i,  UserInteractions ui 
-						where ui.InteractionId = i.InteractionId
-						and ui.MaxParticipants <= ui.TotalParticipants
-						and not exists ( -- Exclui as que j· falharam por outros motivos (e.g., wallet/interaction inexistente)
-										select 1 
-										from  @ValidInsertions vi, inserted i
-										where vi.WalletAddress = i.WalletAddress 
-										and vi.InteractionId = i.InteractionId
-										)
-					)
-					begin
-						raiserror('J· n„o h· interaÁıes possiveis', 16, 1)
-					end
-
-			----------------------------------------------------------------------------------
-			-- 3. Inserir os registos na tabela WalletInteractions e atualizar o numero 
-			--    de participantes na UserInteractions
-			-- 
-			----------------------------------------------------------------------------------
-
-			-- Inserir as linhas v·lidas da tabela tempor·ria para a tabela final
-			insert into WalletInteractions (WalletAddress, InteractionId, JoinedAt)
-† †			select WalletAddress, InteractionId, getdate()
-			from @ValidInsertions;
-
-			-- Atualizar o TotalParticipants para todas as Interactions que receberam novos registos
-			with CountedValid as ( 
-									select InteractionId, count(*) NewRegistrations
-† † † †								from @ValidInsertions
-† † † †								group by InteractionId
-								)
-
-† †			update ui
-† †			set ui.TotalParticipants = ui.TotalParticipants + cv.NewRegistrations
-† †			from UserInteractions ui, CountedValid cv
-			where ui.InteractionId = cv.InteractionId
-		end
 
 
-
-			----------------------------------------------------------------------------------
-			--								Testes do Trigger					     		--
-			----------------------------------------------------------------------------------	
-			-- Teste 1 
-			-- *** Carteiras de Teste ***
-			select * from Wallets
-			insert into Wallets (WalletAddress, FirstSeen)
-				values -- ('0xTestWalletA','2025-01-01 00:00:00'),
-				--	   ('0xTestWalletB','2025-01-01 00:00:00'),
-					   ('0xTestWalletD','2025-01-01 00:00:00');
-
-			-- *** InteraÁ„o de Teste (2 vagas) ***
-			select * from UserInteractions
-			insert into UserInteractions (ContractAddress, InteractionTypeCode, ScheduledAt, DurationMinutes, 
-							TotalParticipants, MaxParticipants, MinWalletAgeDays, InteractionState)
-				values	('0xB33f45A6Dc6c47Aa0b5a5E2a5F01d4b2e9C7b434', 2, '2025-02-01 10:00:00', 60, 
-						0,   -- TotalParticipants inicial: 0
-						2,   -- MaxParticipants: 2 (Apenas 2 vagas)
-						0, 1);
-
-			-- Verificar o ID da nova interaÁ„o
-			select InteractionId, TotalParticipants, MaxParticipants from UserInteractions where MaxParticipants = 2;
-				-- Assumimos que o InteractionId È 3 para os testes.
-
-
-			
-			-- InserÁ„o 1: V·lida, Repetir para dar um erro de duplicacao
-			select * from WalletInteractions
-			insert into WalletInteractions (WalletAddress, InteractionId)
-			values ('0xTestWalletB', 4);
+		-- delete  from Wallets where WalletAddress = '0xTestWalletD'
